@@ -10,6 +10,8 @@ import gregtech.GTMod;
 import gregtech.api.interfaces.tileentity.IMachineBlockUpdateable;
 import gregtech.api.metatileentity.BaseMetaPipeEntity;
 import gregtech.api.metatileentity.implementations.MTECable;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 public class RunnableCableUpdate extends RunnableMachineUpdate {
 
@@ -23,6 +25,7 @@ public class RunnableCableUpdate extends RunnableMachineUpdate {
         }
     }
 
+    private static final Logger LOGGER = LogManager.getLogger("RunnableCableUpdate");
     @Override
     public void run() {
         int posX, posY, posZ;
@@ -82,5 +85,6 @@ public class RunnableCableUpdate extends RunnableMachineUpdate {
                     + "}",
                 e);
         }
+        highlight(visited, world, LOGGER);
     }
 }
