@@ -85,6 +85,8 @@ public class RunnableCableUpdate extends RunnableMachineUpdate {
                     + "}",
                 e);
         }
-        highlight(visited, world, LOGGER);
+        LOGGER.debug("Visited: " + visited.size());
+        dbg(world, "(Cable) Visited: " + visited.size());
+        highlight(visited, world, true);
     }
 }

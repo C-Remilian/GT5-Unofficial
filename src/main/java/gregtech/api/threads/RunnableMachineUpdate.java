@@ -1,6 +1,7 @@
 package gregtech.api.threads;
 
 import java.util.LinkedList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -8,9 +9,10 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 import appeng.api.util.DimensionalCoord;
-import appeng.client.render.highlighter.BlockPosHighlighter;
 import gregtech.api.interfaces.metatileentity.IMetaTileEntity;
 import gregtech.api.metatileentity.MetaPipeEntity;
 import gregtech.api.metatileentity.implementations.MTEFrame;
@@ -30,6 +32,7 @@ import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongSet;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import test.testhighlight;
 
 public class RunnableMachineUpdate implements Runnable {
 
@@ -157,8 +160,10 @@ public class RunnableMachineUpdate implements Runnable {
     @Override
     public void run() {
         int posX, posY, posZ;
+        List<BMPEdata> adjacentCableList = new LinkedList<>();
+        LongSet adjacentCableKeys = new LongOpenHashSet();
         try {
-            runLoop: while (!tQueue.isEmpty()) {
+            while (!tQueue.isEmpty()) {
                 final long packedCoords = tQueue.dequeueLong();
                 posX = CoordinatePacker.unpackX(packedCoords);
                 posY = CoordinatePacker.unpackY(packedCoords);
@@ -184,10 +189,14 @@ public class RunnableMachineUpdate implements Runnable {
                 if (tTileEntity instanceof IMachineBlockUpdateable)
                     ((IMachineBlockUpdateable) tTileEntity).onMachineBlockUpdate();
 
-                // Extract some BaseMetaPipeEntity data for later
+                // Skip propagation through pipes\cables\etc, but save some BaseMetaPipeEntity data for later
                 final boolean isBaseMetaPipeEntity = tTileEntity instanceof BaseMetaPipeEntity;
-                final BMPEdata bmpeData = isBaseMetaPipeEntity ? new BMPEdata((BaseMetaPipeEntity) tTileEntity) : null;
-                //LOGGER.debug("({},{},{}): {}, {}, {}", posX, posY, posZ, isBaseMetaPipeEntity, (bmpeData != null) ? bmpeData.isMetaPipe : "null", (bmpeData != null) ? bmpeData.isPotentialStructureBlock : "null");
+                final BMPEdata bmpeData = isBaseMetaPipeEntity ? new BMPEdata((BaseMetaPipeEntity) tTileEntity, posX, posY, posZ) : null;
+                if (isBaseMetaPipeEntity) {
+                    adjacentCableKeys.add(packedCoords);
+                    adjacentCableList.add(bmpeData);
+                    if (!bmpeData.isPotentialStructureBlock) continue;
+                }
 
                 // Now see if we should add the nearby blocks to the queue:
                 // 1) If we've visited less than 5 blocks, then yes
@@ -201,26 +210,32 @@ public class RunnableMachineUpdate implements Runnable {
                         final ForgeDirection side = ForgeDirection.VALID_DIRECTIONS[i];
                         final long tCoords = CoordinatePacker
                             .pack(posX + side.offsetX, posY + side.offsetY, posZ + side.offsetZ);
-
-                        // Skip propagation through pipes\cables\etc;
-                        // Launch a RunnableCableUpdate if it has a connection to a visited node;
-                        // Remove itself from visited in case there is a not-yet-visited connected machine block
-                        // and to avoid false positive connection checks (e.g. cable runs)
-                        if (isBaseMetaPipeEntity && !bmpeData.isPotentialStructureBlock) {
-                            if (i == 0) visited.remove(packedCoords);
-                            if (bmpeData.isMetaPipe
-                                && bmpeData.metaPipe.isConnectedAtSide(side)
-                                && visited.contains(tCoords)) {
-                                LOGGER.debug("Connection hit at ({},{},{})", posX,posY,posZ);
-                                RunnableCableUpdate.setCableUpdateValues(world, posX, posY, posZ);
-                                continue runLoop;
-                            }
-                        } else if (visited.add(tCoords)) {
+                        if (visited.add(tCoords)) {
                             tQueue.enqueue(tCoords);
                         }
                     }
                 }
             }
+
+            // Check for connected cables-likes and create RunnableCableUpdate for them.
+            // Requires a full list of visited machines to avoid missing not-yet-visited connections
+            // and a full list of BMPEs to avoid false-positives (e.g. cable runs)
+            for (var cable : adjacentCableList) {
+                if (!cable.isMetaPipe) continue;
+                for (int i = 0; i < ForgeDirection.VALID_DIRECTIONS.length; i++) {
+                    final ForgeDirection side = ForgeDirection.VALID_DIRECTIONS[i];
+                    if (!cable.metaPipe.isConnectedAtSide(side)) continue;
+                    final long targetCoords = CoordinatePacker
+                        .pack(cable.x + side.offsetX, cable.y + side.offsetY, cable.z + side.offsetZ);
+                    if (adjacentCableKeys.contains(targetCoords)) continue;
+                    if (visited.contains(targetCoords)) {
+                        LOGGER.debug("Connection hit at ({},{},{})", cable.x, cable.y, cable.z);
+                        dbg(world, "Connection hit at ({"+cable.x+"},{"+cable.y+"},{"+cable.z+"})");
+                        RunnableCableUpdate.setCableUpdateValues(world, cable.x, cable.y, cable.z);
+                    }
+                }
+            }
+
         } catch (Exception e) {
             GTMod.GT_FML_LOGGER.error(
                 "Well this update was broken... " + initialX
@@ -235,22 +250,26 @@ public class RunnableMachineUpdate implements Runnable {
                     + "}",
                 e);
         }
-        highlight(visited, world, LOGGER);
+        LOGGER.debug("Visited: " + visited.size() +"+"+adjacentCableList.size());
+        dbg(world, "(Machine) Visited: " + visited.size() +"+"+adjacentCableList.size());
+        highlight(visited, world, false);
     }
 
     private static class BMPEdata {
+        final int x,y,z;
         final BaseMetaPipeEntity baseMetaPipe;
         final IMetaTileEntity metaTile;
         final MetaPipeEntity metaPipe;
         final boolean isMetaPipe;
         final boolean isPotentialStructureBlock;
 
-        BMPEdata(BaseMetaPipeEntity bmpe) {
-                baseMetaPipe = bmpe;
-                metaTile = baseMetaPipe.getMetaTileEntity();
-                isMetaPipe = metaTile instanceof MetaPipeEntity;
-                metaPipe = isMetaPipe ? (MetaPipeEntity)metaTile : null;
-                isPotentialStructureBlock = metaPipe instanceof MTEFrame;
+        BMPEdata(BaseMetaPipeEntity bmpe, int x, int y, int z) {
+            this.x = x; this.y = y; this.z = z;
+            baseMetaPipe = bmpe;
+            metaTile = baseMetaPipe.getMetaTileEntity();
+            isMetaPipe = metaTile instanceof MetaPipeEntity;
+            metaPipe = isMetaPipe ? (MetaPipeEntity)metaTile : null;
+            isPotentialStructureBlock = metaPipe instanceof MTEFrame;
         }
     }
 
@@ -261,10 +280,8 @@ public class RunnableMachineUpdate implements Runnable {
     }
 
     private static final Logger LOGGER = LogManager.getLogger("RunnableMachineUpdate");
-    protected static long lastHighlight = 0; // concurrentModification prevention, dont @ me
-    protected static void highlight(LongSet visited, World w, Logger l) {
-        if (System.currentTimeMillis() - lastHighlight < 10000) return;
-        lastHighlight = System.currentTimeMillis();
+    protected static Lock CMlock = new ReentrantLock(false);
+    protected static void highlight(LongSet visited, World w, boolean green) {
         LinkedList<DimensionalCoord> cords = new LinkedList<>();
         final int dimId = w.provider.dimensionId;
         for (var cord : visited) {
@@ -273,10 +290,16 @@ public class RunnableMachineUpdate implements Runnable {
             int posZ = CoordinatePacker.unpackZ(cord);
             cords.add(new DimensionalCoord(posX,posY,posZ, dimId));
         }
-        for (var player : w.playerEntities) {
-            BlockPosHighlighter.highlightBlocks(player, cords, null,null,null);
-        }
-        l.debug("Visisted: " + visited.size());
-        dbg(w, "Visisted: " + visited.size());
+        try {
+            while (!CMlock.tryLock(1, TimeUnit.SECONDS)) ;
+            if (visited.size() < 5) {testhighlight.R = 0; testhighlight.G = 0; testhighlight.B = 1; }
+            else if (green) {testhighlight.R = 0; testhighlight.G = 1; testhighlight.B = 0; }
+            else {testhighlight.R = 1; testhighlight.G = 0; testhighlight.B = 0; }
+            for (var player : w.playerEntities) {
+                testhighlight.highlightBlocks(player, cords, null, null, null);
+            }
+            Thread.sleep(3200);
+        } catch (Exception e) {}
+        finally { CMlock.unlock();}
     }
 }
